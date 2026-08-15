@@ -1,9 +1,14 @@
 "use client";
 
 import { FormEvent, useEffect, useState } from "react";
-import { supabase } from "@/lib/supabase";
+import { isSupabaseConfigured, supabase } from "@/lib/supabase";
 
-export default function Auth() {
+type AuthProps = {
+  embedded?: boolean;
+  onAuthenticated?: () => void;
+};
+
+export default function Auth({ embedded = false, onAuthenticated }: AuthProps) {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [isLogin, setIsLogin] = useState(true);
@@ -11,11 +16,17 @@ export default function Auth() {
   const [message, setMessage] = useState("");
 
   useEffect(() => {
-    supabase.auth.getSession();
+    if (!supabase) return;
+    void supabase.auth.getSession();
   }, []);
 
   async function handleSubmit(e: FormEvent) {
     e.preventDefault();
+
+    if (!supabase || !isSupabaseConfigured) {
+      setMessage("Supabase bağlantı ayarları bulunamadı.");
+      return;
+    }
 
     setLoading(true);
     setMessage("");
@@ -27,9 +38,9 @@ export default function Auth() {
       });
 
       if (error) {
-        setMessage(error.message);
+        setMessage(`Giriş yapılamadı: ${error.message}`);
       } else {
-        window.location.reload();
+        onAuthenticated?.();
       }
     } else {
       const { error } = await supabase.auth.signUp({
@@ -38,7 +49,7 @@ export default function Auth() {
       });
 
       if (error) {
-        setMessage(error.message);
+        setMessage(`Kayıt oluşturulamadı: ${error.message}`);
       } else {
         setMessage(
           "Kayıt başarılı. E-posta adresin için doğrulama gerekiyorsa gelen kutunu kontrol et."
@@ -52,12 +63,12 @@ export default function Auth() {
   return (
     <div
       style={{
-        minHeight: "100vh",
+        minHeight: embedded ? undefined : "100vh",
         display: "flex",
         alignItems: "center",
         justifyContent: "center",
         background: "#f5f7fa",
-        padding: 20,
+        padding: embedded ? 0 : 20,
       }}
     >
       <div

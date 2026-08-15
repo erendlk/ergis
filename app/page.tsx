@@ -1,11 +1,27 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
+import type { User } from "@supabase/supabase-js";
+import Auth from "@/components/Auth";
 import Map, {
   type ProjectMapState,
   type SelectedMapFeature,
   type UserMapLayer,
 } from "@/components/Map";
+import { useProjectAutosave } from "@/hooks/useProjectAutosave";
+import {
+  createProject,
+  deleteProject,
+  getProject,
+  listProjects,
+  renameProject,
+} from "@/lib/projects";
+import {
+  PROJECT_DOCUMENT_VERSION,
+  type ProjectSummary,
+  type ProjectWorkspace,
+} from "@/lib/project-types";
+import { isSupabaseConfigured, supabase } from "@/lib/supabase";
 
 type LayerItem = {
   id: string;
@@ -133,6 +149,13 @@ export default function Page() {
   const [uploadOpen, setUploadOpen] = useState(false);
   const [projectsOpen, setProjectsOpen] = useState(false);
   const [serviceOpenRequest, setServiceOpenRequest] = useState(0);
+  const [user, setUser] = useState<User | null>(null);
+  const [authOpen, setAuthOpen] = useState(false);
+  const [activeProjectId, setActiveProjectId] = useState<string | null>(null);
+  const [remoteProjects, setRemoteProjects] = useState<ProjectSummary[]>([]);
+  const [projectsLoading, setProjectsLoading] = useState(false);
+  const [projectNotice, setProjectNotice] = useState("");
+  const [workspaceReady, setWorkspaceReady] = useState(false);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
@@ -151,8 +174,54 @@ export default function Page() {
       if (parsed.projectState) setProjectState(parsed.projectState);
     } catch {
       // Yerel kayıt bozuksa uygulama varsayılanlarla açılır.
+    } finally {
+      setWorkspaceReady(true);
     }
   }, []);
+
+  useEffect(() => {
+    if (!supabase) return;
+
+    let mounted = true;
+    void supabase.auth.getSession().then(({ data }) => {
+      if (mounted) setUser(data.session?.user ?? null);
+    });
+
+    const { data: listener } = supabase.auth.onAuthStateChange((_event, session) => {
+      if (mounted) setUser(session?.user ?? null);
+    });
+
+    return () => {
+      mounted = false;
+      listener.subscription.unsubscribe();
+    };
+  }, []);
+
+  const workspace = useMemo<ProjectWorkspace>(
+    () => ({
+      version: PROJECT_DOCUMENT_VERSION,
+      activeLayers,
+      userLayers,
+      mapState: projectState,
+    }),
+    [activeLayers, projectState, userLayers],
+  );
+
+  const { saveNow: saveRemoteNow, status: remoteSaveStatus } = useProjectAutosave({
+    projectId: activeProjectId,
+    workspace,
+    enabled: workspaceReady && Boolean(user),
+  });
+
+  useEffect(() => {
+    if (!user) {
+      setRemoteProjects([]);
+      setActiveProjectId(null);
+      return;
+    }
+
+    void refreshRemoteProjects();
+  }, [user]);
 
   function makeLayerFromGeoJSON(
     name: string,
@@ -312,9 +381,24 @@ export default function Page() {
     fileInputRef.current?.click();
   }
 
+  async function refreshRemoteProjects() {
+    if (!user) return;
+
+    setProjectsLoading(true);
+    try {
+      setRemoteProjects(await listProjects());
+      setProjectNotice("");
+    } catch {
+      setProjectNotice("Projeler yüklenemedi. Supabase migration'ının uygulandığını kontrol edin.");
+    } finally {
+      setProjectsLoading(false);
+    }
+  }
+
   function openProjects() {
     setProjectMenuOpen(false);
     setProjectsOpen(true);
+    if (user) void refreshRemoteProjects();
   }
 
   function handleServiceOpen() {
@@ -338,17 +422,147 @@ export default function Page() {
     });
   }
 
-  function saveWorkspace() {
+  function saveLocalWorkspace(
+    nextWorkspace = workspace,
+    nextProjectName = projectName,
+  ) {
     const payload = {
-      projectName,
-      activeLayers,
-      userLayers,
-      projectState,
+      projectName: nextProjectName,
+      activeLayers: nextWorkspace.activeLayers,
+      userLayers: nextWorkspace.userLayers,
+      projectState: nextWorkspace.mapState,
       savedAt: new Date().toISOString(),
     };
     localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
+  }
+
+  async function saveWorkspace() {
+    saveLocalWorkspace();
     setSaved(true);
     window.setTimeout(() => setSaved(false), 1800);
+
+    if (!user) {
+      setProjectNotice("Yerel olarak kaydedildi. Buluta kaydetmek için giriş yapın.");
+      return;
+    }
+
+    try {
+      if (!activeProjectId) {
+        const project = await createProject(projectName, workspace);
+        setActiveProjectId(project.id);
+        setRemoteProjects((current) => [project, ...current]);
+        setProjectNotice("Proje Supabase'e kaydedildi.");
+        return;
+      }
+
+      await saveRemoteNow();
+      setProjectNotice("Proje buluta kaydedildi.");
+      void refreshRemoteProjects();
+    } catch {
+      setProjectNotice("Kaydetme başarısız. Bağlantıyı ve Supabase ayarlarını kontrol edin.");
+    }
+  }
+
+  function applyWorkspace(nextWorkspace: ProjectWorkspace) {
+    setActiveLayers(nextWorkspace.activeLayers?.length ? nextWorkspace.activeLayers : ["base"]);
+    setUserLayers(nextWorkspace.userLayers ?? []);
+    setProjectState(nextWorkspace.mapState ?? EMPTY_STATE);
+    setSelectedFeature(null);
+    setRestoreToken((value) => value + 1);
+  }
+
+  async function createRemoteProject() {
+    if (!user) {
+      setAuthOpen(true);
+      return;
+    }
+
+    const name = window.prompt("Yeni projenin adını girin:", "Yeni proje");
+    if (name === null) return;
+    const trimmedName = name.trim();
+    if (!trimmedName) {
+      setProjectNotice("Proje adı boş bırakılamaz.");
+      return;
+    }
+
+    const nextWorkspace: ProjectWorkspace = {
+      version: PROJECT_DOCUMENT_VERSION,
+      activeLayers: ["base"],
+      userLayers: [],
+      mapState: EMPTY_STATE,
+    };
+
+    try {
+      const project = await createProject(trimmedName, nextWorkspace);
+      setProjectName(project.name);
+      setActiveProjectId(project.id);
+      applyWorkspace(nextWorkspace);
+      saveLocalWorkspace(nextWorkspace, project.name);
+      setRemoteProjects((current) => [project, ...current]);
+      setProjectNotice("Yeni proje oluşturuldu.");
+    } catch {
+      setProjectNotice("Proje oluşturulamadı. Supabase migration'ını kontrol edin.");
+    }
+  }
+
+  async function openRemoteProject(id: string) {
+    try {
+      const project = await getProject(id);
+      setProjectName(project.name);
+      setActiveProjectId(project.id);
+      applyWorkspace(project.workspace);
+      setProjectsOpen(false);
+      setProjectNotice("Proje açıldı.");
+    } catch {
+      setProjectNotice("Proje açılamadı.");
+    }
+  }
+
+  async function renameRemoteProject(id: string, currentName: string) {
+    const name = window.prompt("Proje adını girin:", currentName);
+    if (name === null) return;
+    const trimmedName = name.trim();
+    if (!trimmedName) return;
+
+    try {
+      await renameProject(id, trimmedName);
+      if (id === activeProjectId) setProjectName(trimmedName);
+      setRemoteProjects((current) => current.map((project) =>
+        project.id === id ? { ...project, name: trimmedName } : project,
+      ));
+      setProjectNotice("Proje yeniden adlandırıldı.");
+    } catch {
+      setProjectNotice("Proje yeniden adlandırılamadı.");
+    }
+  }
+
+  async function removeRemoteProject(id: string, name: string) {
+    if (!window.confirm(`“${name}” projesi silinsin mi? Bu işlem geri alınamaz.`)) return;
+
+    try {
+      await deleteProject(id);
+      setRemoteProjects((current) => current.filter((project) => project.id !== id));
+      if (id === activeProjectId) setActiveProjectId(null);
+      setProjectNotice("Proje silindi. Yerel çalışma alanınız korunuyor.");
+    } catch {
+      setProjectNotice("Proje silinemedi.");
+    }
+  }
+
+  async function migrateLocalWorkspace() {
+    if (!user) {
+      setAuthOpen(true);
+      return;
+    }
+
+    try {
+      const project = await createProject(projectName, workspace);
+      setActiveProjectId(project.id);
+      setRemoteProjects((current) => [project, ...current]);
+      setProjectNotice("Yerel çalışma alanı buluta aktarıldı. Yerel kopya korunuyor.");
+    } catch {
+      setProjectNotice("Yerel çalışma alanı buluta aktarılamadı.");
+    }
   }
 
   function newWorkspace() {
@@ -368,6 +582,7 @@ export default function Page() {
   setUserLayers([]);
   setProjectState(EMPTY_STATE);
   setSelectedFeature(null);
+  setActiveProjectId(null);
   setRestoreToken((value) => value + 1);
   setProjectMenuOpen(false);
   setProjectsOpen(false);
@@ -563,7 +778,15 @@ export default function Page() {
               boxShadow: "0 6px 22px rgba(15,23,42,0.14)",
             }}
           >
-            {saved ? "✓ Kaydedildi" : "Kaydet"}
+            {remoteSaveStatus === "saving"
+              ? "Kaydediliyor..."
+              : remoteSaveStatus === "saved"
+                ? "✓ Kaydedildi"
+                : remoteSaveStatus === "error"
+                  ? "Kaydetme başarısız"
+                  : saved
+                    ? "✓ Kaydedildi"
+                    : "Kaydet"}
           </button>
 
           <button
@@ -607,6 +830,10 @@ export default function Page() {
             <span>＋</span>
             <span>Yeni çalışma</span>
           </PanelButton>
+          <PanelButton onClick={() => void createRemoteProject()}>
+            <span>☁</span>
+            <span>Yeni bulut projesi</span>
+          </PanelButton>
           <PanelButton onClick={saveWorkspace}>
             <span>▣</span>
             <span>Çalışmayı kaydet</span>
@@ -634,14 +861,38 @@ export default function Page() {
           }}
         >
           <div style={{ fontSize: 12, fontWeight: 800 }}>ERGIS hesabı</div>
-          <div style={{ fontSize: 11, color: "#9ca3af", marginTop: 3 }}>
-            Çalışma alanı
+          <div style={{ fontSize: 11, color: "#9ca3af", marginTop: 3, overflowWrap: "anywhere" }}>
+            {user ? user.email : "Yerel çalışma alanı"}
           </div>
           <div style={{ height: 1, background: "#f1f5f9", margin: "10px 0" }} />
-          <PanelButton>
-            <span>⚙</span>
-            <span>Hesap ayarları</span>
-          </PanelButton>
+          {user ? (
+            <>
+              <PanelButton onClick={openProjects}>
+                <span>⌁</span>
+                <span>Bulut projelerim</span>
+              </PanelButton>
+              <PanelButton
+                onClick={() => {
+                  void supabase?.auth.signOut();
+                  setAccountMenuOpen(false);
+                }}
+                danger
+              >
+                <span>↪</span>
+                <span>Çıkış yap</span>
+              </PanelButton>
+            </>
+          ) : (
+            <PanelButton
+              onClick={() => {
+                setAuthOpen(true);
+                setAccountMenuOpen(false);
+              }}
+            >
+              <span>↪</span>
+              <span>Giriş yap / kayıt ol</span>
+            </PanelButton>
+          )}
           <PanelButton onClick={() => setAccountMenuOpen(false)} danger>
             <span>↪</span>
             <span>Menüyü kapat</span>
@@ -1158,6 +1409,58 @@ export default function Page() {
         style={{ display: "none" }}
       />
 
+      {authOpen && (
+        <div
+          style={{
+            position: "absolute",
+            inset: 0,
+            zIndex: 820,
+            display: "grid",
+            placeItems: "center",
+            padding: 14,
+            background: "rgba(15,23,42,0.45)",
+            backdropFilter: "blur(4px)",
+          }}
+          onClick={() => setAuthOpen(false)}
+        >
+          <div
+            style={{
+              width: 420,
+              maxWidth: "100%",
+              padding: 20,
+              borderRadius: 16,
+              background: "#fff",
+              boxShadow: "0 20px 60px rgba(15,23,42,0.24)",
+            }}
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div style={{ display: "flex", justifyContent: "flex-end" }}>
+              <button
+                type="button"
+                onClick={() => setAuthOpen(false)}
+                aria-label="Giriş penceresini kapat"
+                style={{ width: 30, height: 30, border: "1px solid #e5e7eb", borderRadius: 8, background: "#fff", cursor: "pointer", fontSize: 17 }}
+              >
+                ×
+              </button>
+            </div>
+            {isSupabaseConfigured ? (
+              <Auth
+                embedded
+                onAuthenticated={() => {
+                  setAuthOpen(false);
+                  setProjectNotice("Giriş yapıldı. Yerel çalışmanızı isterseniz buluta aktarabilirsiniz.");
+                }}
+              />
+            ) : (
+              <div style={{ padding: "16px 0", color: "#b91c1c", fontSize: 13 }}>
+                Supabase bağlantı ayarları bulunamadı. Yerel çalışma alanı kullanılmaya devam edebilir.
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
       {uploadOpen && (
         <div
           style={{
@@ -1250,7 +1553,7 @@ export default function Page() {
               <div>
                 <div style={{ fontSize: 16, fontWeight: 850 }}>Projelerim</div>
                 <div style={{ marginTop: 4, fontSize: 11, color: "#9ca3af" }}>
-                  Bu çalışma alanındaki kayıtlı proje.
+                  {user ? "Supabase hesabınıza ait projeler." : "Yerel çalışma alanınız giriş yapmadan da kullanılabilir."}
                 </div>
               </div>
               <button
@@ -1261,6 +1564,69 @@ export default function Page() {
                 ×
               </button>
             </div>
+
+            {projectNotice && (
+              <div style={{ marginTop: 12, padding: "9px 10px", borderRadius: 9, background: "#f8fafc", color: "#475569", fontSize: 11 }}>
+                {projectNotice}
+              </div>
+            )}
+
+            {user ? (
+              <>
+                <div style={{ display: "flex", gap: 8, marginTop: 14 }}>
+                  <button
+                    type="button"
+                    onClick={() => void createRemoteProject()}
+                    style={{ flex: 1, padding: 10, borderRadius: 9, border: "1px solid #111827", background: "#111827", color: "#fff", cursor: "pointer", fontWeight: 800, fontSize: 11 }}
+                  >
+                    ＋ Yeni proje
+                  </button>
+                  {!activeProjectId && (
+                    <button
+                      type="button"
+                      onClick={() => void migrateLocalWorkspace()}
+                      style={{ flex: 1, padding: 10, borderRadius: 9, border: "1px solid #cbd5e1", background: "#fff", color: "#334155", cursor: "pointer", fontWeight: 800, fontSize: 11 }}
+                    >
+                      ☁ Yereli buluta aktar
+                    </button>
+                  )}
+                </div>
+
+                <div style={{ marginTop: 15, fontSize: 10, fontWeight: 850, letterSpacing: "0.08em", color: "#94a3b8", textTransform: "uppercase" }}>
+                  Bulut projeleri
+                </div>
+                {projectsLoading ? (
+                  <div style={{ marginTop: 9, fontSize: 11, color: "#64748b" }}>Projeler yükleniyor...</div>
+                ) : remoteProjects.length === 0 ? (
+                  <div style={{ marginTop: 9, padding: 12, borderRadius: 10, background: "#f8fafc", color: "#64748b", fontSize: 11 }}>
+                    Henüz bulut projesi yok.
+                  </div>
+                ) : (
+                  <div style={{ display: "grid", gap: 7, marginTop: 9, maxHeight: 220, overflowY: "auto" }}>
+                    {remoteProjects.map((project) => (
+                      <div key={project.id} style={{ padding: 10, border: activeProjectId === project.id ? "1px solid #111827" : "1px solid #e5e7eb", borderRadius: 10, background: "#fff" }}>
+                        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                          <button type="button" onClick={() => void openRemoteProject(project.id)} style={{ flex: 1, border: 0, background: "transparent", padding: 0, cursor: "pointer", textAlign: "left" }}>
+                            <div style={{ fontSize: 12, fontWeight: 800, color: "#111827" }}>{project.name}</div>
+                            <div style={{ marginTop: 3, fontSize: 9, color: "#9ca3af" }}>Son güncelleme: {new Date(project.updatedAt).toLocaleString("tr-TR")}</div>
+                          </button>
+                          <button type="button" onClick={() => void renameRemoteProject(project.id, project.name)} title="Yeniden adlandır" style={{ width: 27, height: 27, border: "1px solid #e5e7eb", borderRadius: 7, background: "#fff", cursor: "pointer" }}>✎</button>
+                          <button type="button" onClick={() => void removeRemoteProject(project.id, project.name)} title="Sil" style={{ width: 27, height: 27, border: "1px solid #fecaca", borderRadius: 7, background: "#fff1f2", color: "#b91c1c", cursor: "pointer" }}>×</button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </>
+            ) : (
+              <button
+                type="button"
+                onClick={() => setAuthOpen(true)}
+                style={{ width: "100%", marginTop: 14, padding: 11, borderRadius: 10, border: "1px solid #111827", background: "#111827", color: "#fff", cursor: "pointer", fontWeight: 800 }}
+              >
+                Bulut projeleri için giriş yap
+              </button>
+            )}
 
             <button
               type="button"
