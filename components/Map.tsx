@@ -138,6 +138,7 @@ interface MapProps {
   onProjectStateChange?: (state: ProjectMapState) => void;
   onFeatureSelect?: (feature: SelectedMapFeature | null) => void;
   restoreProject?: { state: ProjectMapState; token: number };
+  serviceOpenRequest?: number;
 }
 
 /* ---------------------------------------------------------
@@ -491,6 +492,7 @@ export default function Map({
   onProjectStateChange,
   onFeatureSelect,
   restoreProject,
+  serviceOpenRequest,
 }: MapProps) {
   const mapContainer = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<MapLibreMap | null>(null);
@@ -550,6 +552,17 @@ export default function Map({
   const [serviceLayer, setServiceLayer] = useState("");
   const [externalServices, setExternalServices] = useState<ExternalMapService[]>([]);
   const externalServicesRef = useRef<ExternalMapService[]>([]);
+
+  useEffect(() => {
+    if (!serviceOpenRequest) return;
+
+    setServicesPanelOpen(true);
+    setCbsToolOpen(false);
+    setLayerPanelOpen(false);
+    setLegendOpen(false);
+    setStylePanelOpen(false);
+    setAttributeTableOpen(false);
+  }, [serviceOpenRequest]);
 
   const [message, setMessage] = useState("");
   const messageTimer = useRef<number | null>(null);
