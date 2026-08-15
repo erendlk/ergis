@@ -1,873 +1,1342 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
-import Map, { type UserMapLayer } from "../components/Map";
+import { useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
+import Map, {
+  type ProjectMapState,
+  type SelectedMapFeature,
+  type UserMapLayer,
+} from "@/components/Map";
 
-// Harici @types/geojson paketi gerektirmeyen GeoJSON tipleri.
-type GeoJSONGeometry = {
-  type: "Point" | "LineString" | "Polygon" | "MultiPoint" | "MultiLineString" | "MultiPolygon" | "GeometryCollection";
-  coordinates?: any;
-};
-type GeoJSONFeature = {
-  type: "Feature";
-  geometry: GeoJSONGeometry | null;
-  properties?: Record<string, unknown> | null;
-};
-type GeoJSONFeatureCollection = {
-  type: "FeatureCollection";
-  features: GeoJSONFeature[];
-};
-
-type StoredLayer = UserMapLayer & {
-  sourceName: string;
-};
-
-const STORAGE_KEY = "sehirgis-user-layers-v1";
-const PROJECTS_KEY = "sehirgis-projects-v1";
-
-type ProjectRecord = {
+type LayerItem = {
   id: string;
   name: string;
-  createdAt: string;
-  updatedAt: string;
-  userLayers: StoredLayer[];
+  short: string;
+  icon: string;
+  color: string;
+  description: string;
 };
 
-function createProject(name: string, userLayers: StoredLayer[]): ProjectRecord {
-  const now = new Date().toISOString();
+const SYSTEM_LAYERS: LayerItem[] = [
+  { id: "base", name: "Temel harita", short: "Harita", icon: "▦", color: "#2563eb", description: "OpenStreetMap taban haritası" },
+  { id: "satellite", name: "Uydu görüntüsü", short: "Uydu", icon: "◉", color: "#7c3aed", description: "Uydu görüntüsü" },
+  { id: "parcels", name: "Parseller", short: "Parsel", icon: "▤", color: "#f59e0b", description: "Kadastro / parsel katmanı" },
+  { id: "zoning", name: "İmar planları", short: "İmar", icon: "▧", color: "#ef4444", description: "İmar planı verileri" },
+  { id: "buildings", name: "Yapılar", short: "Yapı", icon: "⌂", color: "#64748b", description: "Yapı ve bina verileri" },
+  { id: "transport", name: "Ulaşım", short: "Ulaşım", icon: "↔", color: "#0f766e", description: "Yol ve ulaşım ağı" },
+  { id: "green", name: "Yeşil alanlar", short: "Yeşil", icon: "◇", color: "#16a34a", description: "Park ve yeşil alanlar" },
+  { id: "education", name: "Eğitim alanları", short: "Eğitim", icon: "□", color: "#ca8a04", description: "Eğitim tesisleri" },
+  { id: "health", name: "Sağlık alanları", short: "Sağlık", icon: "+", color: "#dc2626", description: "Sağlık tesisleri" },
+];
+
+const STORAGE_KEY = "ergis-atlas-ui-v1";
+
+const EMPTY_STATE: ProjectMapState = {
+  center: [29.06, 40.19],
+  zoom: 6,
+  satellite: false,
+  scaleDenominator: 1000,
+  points: [],
+  drawings: [],
+  externalServices: [],
+};
+
+function iconButtonStyle(active = false): CSSProperties {
   return {
-    id: randomId(),
-    name,
-    createdAt: now,
-    updatedAt: now,
-    userLayers,
+    width: 36,
+    height: 36,
+    borderRadius: 10,
+    border: active ? "1px solid #111827" : "1px solid #e5e7eb",
+    background: active ? "#111827" : "#fff",
+    color: active ? "#fff" : "#374151",
+    display: "grid",
+    placeItems: "center",
+    cursor: "pointer",
+    fontSize: 16,
+    fontWeight: 700,
+    flexShrink: 0,
   };
 }
 
-const layers = [
-  { id: "base", name: "Temel Harita", icon: "▦" },
-  { id: "satellite", name: "Uydu Görüntüsü", icon: "◉" },
-  { id: "parcel", name: "Parseller", icon: "▤" },
-  { id: "zoning", name: "İmar Planları", icon: "▥" },
-  { id: "building", name: "Binalar", icon: "▧" },
-  { id: "transport", name: "Ulaşım", icon: "⇄" },
-  { id: "green", name: "Yeşil Alanlar", icon: "♧" },
-  { id: "education", name: "Eğitim Alanları", icon: "◇" },
-  { id: "health", name: "Sağlık Alanları", icon: "+" },
-];
-
-const turkishFlag =
-  "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 900 600'%3E%3Crect width='900' height='600' fill='%23e30a17'/%3E%3Ccircle cx='380' cy='300' r='155' fill='white'/%3E%3Ccircle cx='425' cy='300' r='125' fill='%23e30a17'/%3E%3Cpolygon points='555,300 575,344 622,348 586,378 596,425 555,400 514,425 524,378 488,348 535,344' fill='white'/%3E%3C/svg%3E";
-
-function randomId() {
-  return `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+function PanelButton({
+  children,
+  active,
+  onClick,
+  danger,
+}: {
+  children: ReactNode;
+  active?: boolean;
+  onClick?: () => void;
+  danger?: boolean;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      style={{
+        width: "100%",
+        border: active ? "1px solid #d1d5db" : "1px solid transparent",
+        background: active ? "#f8fafc" : "transparent",
+        color: danger ? "#b91c1c" : "#111827",
+        borderRadius: 10,
+        padding: "10px 11px",
+        display: "flex",
+        alignItems: "center",
+        gap: 10,
+        cursor: "pointer",
+        textAlign: "left",
+        fontSize: 13,
+        fontWeight: 650,
+      }}
+    >
+      {children}
+    </button>
+  );
 }
 
-function csvToGeoJSON(text: string): GeoJSONFeatureCollection {
-  const rows = text.trim().split(/\r?\n/).filter(Boolean);
-  if (rows.length < 2) throw new Error("CSV dosyası boş.");
-
-  const delimiter = rows[0].includes(";") ? ";" : ",";
-  const headers = rows[0].split(delimiter).map((x) => x.trim().replace(/^"|"$/g, ""));
-  const lower = headers.map((x) => x.toLowerCase());
-
-  const latIndex = lower.findIndex((x) => ["lat", "latitude", "y"].includes(x));
-  const lonIndex = lower.findIndex((x) => ["lon", "lng", "longitude", "x"].includes(x));
-
-  if (latIndex < 0 || lonIndex < 0) {
-    throw new Error("CSV için latitude/longitude veya X/Y sütunları gerekli.");
-  }
-
-  const features: GeoJSONFeature[] = [];
-
-  for (let i = 1; i < rows.length; i++) {
-    const values = rows[i].split(delimiter).map((x) => x.trim().replace(/^"|"$/g, ""));
-    const lat = Number(values[latIndex]);
-    const lon = Number(values[lonIndex]);
-    if (!Number.isFinite(lat) || !Number.isFinite(lon)) continue;
-
-    const properties: Record<string, string> = {};
-    headers.forEach((header, index) => {
-      properties[header] = values[index] ?? "";
-    });
-
-    features.push({
-      type: "Feature",
-      geometry: {
-        type: "Point",
-        coordinates: [lon, lat],
-      },
-      properties,
-    });
-  }
-
-  return { type: "FeatureCollection", features };
+function SectionTitle({ eyebrow, title }: { eyebrow?: string; title: string }) {
+  return (
+    <div style={{ marginBottom: 12 }}>
+      {eyebrow && (
+        <div
+          style={{
+            fontSize: 9,
+            letterSpacing: "0.13em",
+            textTransform: "uppercase",
+            color: "#9ca3af",
+            fontWeight: 800,
+            marginBottom: 4,
+          }}
+        >
+          {eyebrow}
+        </div>
+      )}
+      <div style={{ fontSize: 15, fontWeight: 800, color: "#111827" }}>{title}</div>
+    </div>
+  );
 }
 
-function kmlToGeoJSON(text: string): GeoJSONFeatureCollection {
-  const xml = new DOMParser().parseFromString(text, "text/xml");
-  if (xml.querySelector("parsererror")) throw new Error("KML okunamadı.");
-
-  const features: GeoJSONFeature[] = [];
-
-  xml.querySelectorAll("Placemark").forEach((placemark) => {
-    const name = placemark.querySelector("name")?.textContent?.trim() ?? "KML nesnesi";
-
-    const point = placemark.querySelector("Point coordinates");
-    const line = placemark.querySelector("LineString coordinates");
-    const polygon = placemark.querySelector("Polygon outerBoundaryIs LinearRing coordinates");
-
-    if (point?.textContent) {
-      const c = point.textContent.trim().split(",").map(Number);
-      if (c.length >= 2 && Number.isFinite(c[0]) && Number.isFinite(c[1])) {
-        features.push({
-          type: "Feature",
-          properties: { name },
-          geometry: { type: "Point", coordinates: [c[0], c[1]] },
-        });
-      }
-    } else if (line?.textContent) {
-      const coordinates = line.textContent.trim().split(/\s+/)
-        .map((v) => v.split(",").map(Number))
-        .filter((v) => v.length >= 2 && Number.isFinite(v[0]) && Number.isFinite(v[1]))
-        .map((v) => [v[0], v[1]] as [number, number]);
-
-      if (coordinates.length >= 2) {
-        features.push({
-          type: "Feature",
-          properties: { name },
-          geometry: { type: "LineString", coordinates },
-        });
-      }
-    } else if (polygon?.textContent) {
-      const coordinates = polygon.textContent.trim().split(/\s+/)
-        .map((v) => v.split(",").map(Number))
-        .filter((v) => v.length >= 2 && Number.isFinite(v[0]) && Number.isFinite(v[1]))
-        .map((v) => [v[0], v[1]] as [number, number]);
-
-      if (coordinates.length >= 3) {
-        const first = coordinates[0];
-        const last = coordinates[coordinates.length - 1];
-        if (first[0] !== last[0] || first[1] !== last[1]) coordinates.push(first);
-
-        features.push({
-          type: "Feature",
-          properties: { name },
-          geometry: { type: "Polygon", coordinates: [coordinates] },
-        });
-      }
-    }
-  });
-
-  return { type: "FeatureCollection", features };
-}
-
-async function fileToGeoJSON(file: File): Promise<GeoJSONFeatureCollection> {
-  const extension = file.name.split(".").pop()?.toLowerCase();
-
-  if (extension === "geojson" || extension === "json") {
-    const parsed = JSON.parse(await file.text());
-    if (parsed.type === "FeatureCollection") return parsed;
-    if (parsed.type === "Feature") {
-      return {
-        type: "FeatureCollection",
-        features: [parsed],
-      };
-    }
-    throw new Error("GeoJSON Feature veya FeatureCollection bekleniyor.");
-  }
-
-  if (extension === "csv") return csvToGeoJSON(await file.text());
-  if (extension === "kml") return kmlToGeoJSON(await file.text());
-
-  throw new Error("Şimdilik GeoJSON, JSON, CSV ve KML destekleniyor.");
-}
-
-export default function Home() {
-  const [selectedLayer, setSelectedLayer] = useState("base");
-  const [userLayers, setUserLayers] = useState<StoredLayer[]>([]);
-  const [uploadOpen, setUploadOpen] = useState(false);
-  const [dragging, setDragging] = useState(false);
-  const [message, setMessage] = useState("");
-  const [storageLoaded, setStorageLoaded] = useState(false);
-  const [projects, setProjects] = useState<ProjectRecord[]>([]);
-  const [projectsOpen, setProjectsOpen] = useState(false);
-  const [projectNameOpen, setProjectNameOpen] = useState(false);
-  const [projectName, setProjectName] = useState("");
-  const [activeProjectId, setActiveProjectId] = useState<string | null>(null);
+export default function Page() {
+  const [activeLayers, setActiveLayers] = useState<string[]>(["base"]);
+  const [userLayers, setUserLayers] = useState<UserMapLayer[]>([]);
   const [searchText, setSearchText] = useState("");
-  const [searchRequest, setSearchRequest] = useState<{ query: string; id: number } | undefined>();
+  const [searchRequest, setSearchRequest] = useState<{ query: string; id: number }>();
+  const [selectedFeature, setSelectedFeature] = useState<SelectedMapFeature | null>(null);
+  const [projectState, setProjectState] = useState<ProjectMapState>(EMPTY_STATE);
+  const [restoreToken, setRestoreToken] = useState(0);
+  const [projectName, setProjectName] = useState("Yeni çalışma");
+  const [layerSearch, setLayerSearch] = useState("");
+  const [leftOpen, setLeftOpen] = useState(true);
+  const [rightOpen, setRightOpen] = useState(true);
+  const [projectMenuOpen, setProjectMenuOpen] = useState(false);
+  const [accountMenuOpen, setAccountMenuOpen] = useState(false);
+  const [saved, setSaved] = useState(false);
+  const [uploadOpen, setUploadOpen] = useState(false);
+  const [projectsOpen, setProjectsOpen] = useState(false);
+  const [serviceOpenRequest, setServiceOpenRequest] = useState(0);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
     try {
-      const saved = localStorage.getItem(STORAGE_KEY);
-      if (saved) setUserLayers(JSON.parse(saved));
-
-      const savedProjects = localStorage.getItem(PROJECTS_KEY);
-      if (savedProjects) setProjects(JSON.parse(savedProjects));
+      const raw = localStorage.getItem(STORAGE_KEY);
+      if (!raw) return;
+      const parsed = JSON.parse(raw) as {
+        projectName?: string;
+        activeLayers?: string[];
+        userLayers?: UserMapLayer[];
+        projectState?: ProjectMapState;
+      };
+      if (parsed.projectName) setProjectName(parsed.projectName);
+      if (parsed.activeLayers?.length) setActiveLayers(parsed.activeLayers);
+      if (parsed.userLayers) setUserLayers(parsed.userLayers);
+      if (parsed.projectState) setProjectState(parsed.projectState);
     } catch {
-      setUserLayers([]);
-    } finally {
-      setStorageLoaded(true);
+      // Yerel kayıt bozuksa uygulama varsayılanlarla açılır.
     }
   }, []);
 
-  useEffect(() => {
-    if (!storageLoaded) return;
-    try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(userLayers));
-    } catch {
-      showMessage("⚠ Veri tarayıcı depolama sınırını aştı.");
-    }
-  }, [userLayers, storageLoaded]);
+  function makeLayerFromGeoJSON(
+    name: string,
+    data: UserMapLayer["data"],
+  ): UserMapLayer {
+    const firstGeometry = data.features.find((feature) => feature.geometry)?.geometry;
+    const geometryType =
+      firstGeometry?.type === "Point" || firstGeometry?.type === "MultiPoint"
+        ? "Point"
+        : firstGeometry?.type === "LineString" || firstGeometry?.type === "MultiLineString"
+          ? "LineString"
+          : "Polygon";
 
-  useEffect(() => {
-    if (!storageLoaded) return;
-    try {
-      localStorage.setItem(PROJECTS_KEY, JSON.stringify(projects));
-    } catch {
-      showMessage("⚠ Projeler tarayıcı depolama sınırını aştı.");
-    }
-  }, [projects, storageLoaded]);
-
-  // Aktif proje açıkken değişiklikleri 10 dakikada bir otomatik kaydet.
-  useEffect(() => {
-    if (!storageLoaded || !activeProjectId) return;
-
-    const autosave = () => {
-      setProjects((current) =>
-        current.map((project) =>
-          project.id === activeProjectId
-            ? {
-                ...project,
-                userLayers,
-                updatedAt: new Date().toISOString(),
-              }
-            : project,
-        ),
-      );
+    return {
+      id: `user-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      name,
+      visible: true,
+      data,
+      color: "#2563eb",
+      opacity: 1,
+      geometryType,
     };
-
-    const timer = window.setInterval(autosave, 10 * 60 * 1000);
-    return () => window.clearInterval(timer);
-  }, [activeProjectId, storageLoaded, userLayers]);
-
-  const mapLayers = useMemo<UserMapLayer[]>(
-    () => userLayers.map(({ sourceName, ...layer }) => layer),
-    [userLayers],
-  );
-
-  function showMessage(text: string) {
-    setMessage(text);
-    window.setTimeout(() => setMessage(""), 2200);
   }
 
-  async function importFiles(files: FileList | File[]) {
-    const fileArray = Array.from(files);
-    if (!fileArray.length) return;
+  function csvToGeoJSON(text: string): UserMapLayer["data"] {
+    const rows = text
+      .split(/\r?\n/)
+      .map((row) => row.trim())
+      .filter(Boolean);
 
-    for (const file of fileArray) {
+    if (rows.length < 2) {
+      throw new Error("CSV dosyasında veri bulunamadı.");
+    }
+
+    const headers = rows[0].split(",").map((value) => value.trim().toLowerCase());
+    const latIndex = headers.findIndex((value) => ["lat", "latitude", "enlem", "y"].includes(value));
+    const lonIndex = headers.findIndex((value) => ["lon", "lng", "longitude", "boylam", "x"].includes(value));
+
+    if (latIndex < 0 || lonIndex < 0) {
+      throw new Error("CSV için lat/lon veya enlem/boylam sütunları gerekli.");
+    }
+
+    const features = rows.slice(1).flatMap((row) => {
+      const values = row.split(",").map((value) => value.trim());
+      const lat = Number(values[latIndex]);
+      const lon = Number(values[lonIndex]);
+
+      if (!Number.isFinite(lat) || !Number.isFinite(lon)) return [];
+
+      const properties: Record<string, unknown> = {};
+      headers.forEach((header, index) => {
+        if (header) properties[header] = values[index] ?? "";
+      });
+
+      return [{
+        type: "Feature" as const,
+        properties,
+        geometry: { type: "Point" as const, coordinates: [lon, lat] },
+      }];
+    });
+
+    return { type: "FeatureCollection", features };
+  }
+
+  async function fileToGeoJSON(file: File): Promise<UserMapLayer["data"]> {
+    const extension = file.name.split(".").pop()?.toLowerCase();
+
+    if (extension === "geojson" || extension === "json") {
+      const parsed = JSON.parse(await file.text());
+      if (parsed?.type === "FeatureCollection") return parsed;
+      if (parsed?.type === "Feature") {
+        return { type: "FeatureCollection", features: [parsed] };
+      }
+      throw new Error("GeoJSON Feature veya FeatureCollection bekleniyor.");
+    }
+
+    if (extension === "csv") {
+      return csvToGeoJSON(await file.text());
+    }
+
+    if (extension === "kml") {
+      const xml = new DOMParser().parseFromString(await file.text(), "text/xml");
+      const features: UserMapLayer["data"]["features"] = [];
+
+      xml.querySelectorAll("Placemark").forEach((placemark) => {
+        const name = placemark.querySelector("name")?.textContent?.trim() ?? "KML nesnesi";
+        const point = placemark.querySelector("Point coordinates")?.textContent?.trim();
+        const line = placemark.querySelector("LineString coordinates")?.textContent?.trim();
+        const polygon = placemark.querySelector("Polygon outerBoundaryIs LinearRing coordinates")?.textContent?.trim();
+
+        if (point) {
+          const values = point.split(",").map(Number);
+          if (values.length >= 2 && Number.isFinite(values[0]) && Number.isFinite(values[1])) {
+            features.push({
+              type: "Feature",
+              properties: { name },
+              geometry: { type: "Point", coordinates: [values[0], values[1]] },
+            });
+          }
+        } else if (line) {
+          const coordinates = line.split(/\s+/).map((value) => value.split(",").map(Number))
+            .filter((value) => value.length >= 2 && Number.isFinite(value[0]) && Number.isFinite(value[1]))
+            .map((value) => [value[0], value[1]] as [number, number]);
+          if (coordinates.length >= 2) {
+            features.push({
+              type: "Feature",
+              properties: { name },
+              geometry: { type: "LineString", coordinates },
+            });
+          }
+        } else if (polygon) {
+          const coordinates = polygon.split(/\s+/).map((value) => value.split(",").map(Number))
+            .filter((value) => value.length >= 2 && Number.isFinite(value[0]) && Number.isFinite(value[1]))
+            .map((value) => [value[0], value[1]] as [number, number]);
+          if (coordinates.length >= 3) {
+            const first = coordinates[0];
+            const last = coordinates[coordinates.length - 1];
+            if (first[0] !== last[0] || first[1] !== last[1]) coordinates.push(first);
+            features.push({
+              type: "Feature",
+              properties: { name },
+              geometry: { type: "Polygon", coordinates: [coordinates] },
+            });
+          }
+        }
+      });
+
+      return { type: "FeatureCollection", features };
+    }
+
+    throw new Error("Desteklenen formatlar: GeoJSON, JSON, CSV ve KML.");
+  }
+
+  async function handleFiles(fileList: FileList | null) {
+    if (!fileList?.length) return;
+
+    const imported: UserMapLayer[] = [];
+
+    for (const file of Array.from(fileList)) {
       try {
         const data = await fileToGeoJSON(file);
-        const layer: StoredLayer = {
-          id: randomId(),
-          name: file.name.replace(/\.[^.]+$/, ""),
-          sourceName: file.name,
-          visible: true,
-          data,
-          color: "#2563eb",
-          opacity: 1,
-        };
-
-        setUserLayers((current) => [...current, layer]);
-        showMessage(`✓ ${file.name} haritaya eklendi`);
+        imported.push(makeLayerFromGeoJSON(file.name.replace(/\.[^.]+$/, ""), data));
       } catch (error) {
-        showMessage(`⚠ ${file.name}: ${error instanceof Error ? error.message : "Dosya okunamadı"}`);
+        window.alert(`${file.name}: ${error instanceof Error ? error.message : "Dosya okunamadı."}`);
       }
     }
 
+    if (imported.length) {
+      setUserLayers((current) => [...current, ...imported]);
+    }
+
     setUploadOpen(false);
+    if (fileInputRef.current) fileInputRef.current.value = "";
   }
 
-  function toggleLayer(id: string) {
-    setUserLayers((current) =>
-      current.map((layer) =>
-        layer.id === id ? { ...layer, visible: !layer.visible } : layer,
-      ),
-    );
-  }
-
-  function renameLayer(id: string) {
-    const layer = userLayers.find((item) => item.id === id);
-    if (!layer) return;
-
-    const name = window.prompt("Yeni katman adı:", layer.name);
-    if (!name?.trim()) return;
-
-    setUserLayers((current) =>
-      current.map((item) =>
-        item.id === id ? { ...item, name: name.trim() } : item,
-      ),
-    );
-  }
-
-  function deleteLayer(id: string) {
-    setUserLayers((current) => current.filter((layer) => layer.id !== id));
+  function openFilePicker() {
+    fileInputRef.current?.click();
   }
 
   function openProjects() {
+    setProjectMenuOpen(false);
     setProjectsOpen(true);
   }
 
-  function startNewProject() {
-    setProjectName("");
-    setProjectNameOpen(true);
+  function handleServiceOpen() {
+    setServiceOpenRequest((value) => value + 1);
   }
 
-  function confirmNewProject() {
-    const name = projectName.trim();
-    if (!name) {
-      showMessage("⚠ Proje adı gir.");
-      return;
-    }
-
-    const project = createProject(name, userLayers);
-    setProjects((current) => [project, ...current]);
-    setActiveProjectId(project.id);
-    setProjectNameOpen(false);
-    setProjectsOpen(false);
-    showMessage(`✓ ${project.name} oluşturuldu`);
+  function handleSearch() {
+    const query = searchText.trim();
+    if (!query) return;
+    setSearchRequest({ query, id: Date.now() });
   }
 
-  function openProject(project: ProjectRecord) {
-    setUserLayers(project.userLayers ?? []);
-    setActiveProjectId(project.id);
-    setProjectsOpen(false);
-    showMessage(`✓ ${project.name} açıldı`);
+  function toggleLayer(id: string) {
+    setActiveLayers((current) => {
+      if (id === "base") {
+        return current.includes("base") ? current : ["base", ...current];
+      }
+      return current.includes(id)
+        ? current.filter((item) => item !== id)
+        : [...current, id];
+    });
   }
 
-  function renameProject(project: ProjectRecord) {
-    const name = window.prompt("Yeni proje adı:", project.name);
-    if (!name?.trim()) return;
+  function saveWorkspace() {
+    const payload = {
+      projectName,
+      activeLayers,
+      userLayers,
+      projectState,
+      savedAt: new Date().toISOString(),
+    };
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
+    setSaved(true);
+    window.setTimeout(() => setSaved(false), 1800);
+  }
 
-    setProjects((current) =>
-      current.map((item) =>
-        item.id === project.id
-          ? { ...item, name: name.trim(), updatedAt: new Date().toISOString() }
-          : item,
-      ),
+  function newWorkspace() {
+  const name = window.prompt("Yeni çalışmanın adını girin:", "Yeni çalışma");
+
+  if (name === null) return;
+
+  const trimmedName = name.trim();
+
+  if (!trimmedName) {
+    window.alert("Çalışma adı boş bırakılamaz.");
+    return;
+  }
+
+  setProjectName(trimmedName);
+  setActiveLayers(["base"]);
+  setUserLayers([]);
+  setProjectState(EMPTY_STATE);
+  setSelectedFeature(null);
+  setRestoreToken((value) => value + 1);
+  setProjectMenuOpen(false);
+  setProjectsOpen(false);
+  localStorage.removeItem(STORAGE_KEY);
+}
+
+  const filteredLayers = useMemo(() => {
+    const q = layerSearch.trim().toLocaleLowerCase("tr-TR");
+    if (!q) return SYSTEM_LAYERS;
+    return SYSTEM_LAYERS.filter(
+      (layer) =>
+        layer.name.toLocaleLowerCase("tr-TR").includes(q) ||
+        layer.description.toLocaleLowerCase("tr-TR").includes(q)
     );
-  }
+  }, [layerSearch]);
 
-  function deleteProject(project: ProjectRecord) {
-    if (!window.confirm(`"${project.name}" projesi silinsin mi?`)) return;
-
-    setProjects((current) => current.filter((item) => item.id !== project.id));
-    if (activeProjectId === project.id) setActiveProjectId(null);
-    showMessage("✓ Proje silindi");
-  }
-
-  function saveActiveProjectNow() {
-    if (!activeProjectId) {
-      showMessage("⚠ Önce bir proje aç.");
-      return;
-    }
-
-    setProjects((current) =>
-      current.map((project) =>
-        project.id === activeProjectId
-          ? {
-              ...project,
-              userLayers,
-              updatedAt: new Date().toISOString(),
-            }
-          : project,
-      ),
-    );
-    showMessage("✓ Proje kaydedildi");
-  }
-
-  const panelStyle = {
-    backgroundImage: `
-      linear-gradient(rgba(255,255,255,0.84), rgba(255,255,255,0.84)),
-      url("${turkishFlag}")
-    `,
-    backgroundSize: "cover",
-    backgroundPosition: "center",
-  };
+  const mapRestore = useMemo(
+    () => ({ state: projectState, token: restoreToken }),
+    [projectState, restoreToken]
+  );
 
   return (
     <main
-      className="h-screen w-screen overflow-hidden bg-slate-100 text-slate-900"
-      onDragOver={(event) => {
-        event.preventDefault();
-        setDragging(true);
-      }}
-      onDragLeave={() => setDragging(false)}
-      onDrop={(event) => {
-        event.preventDefault();
-        setDragging(false);
-        void importFiles(event.dataTransfer.files);
+      style={{
+        height: "100dvh",
+        width: "100%",
+        overflow: "hidden",
+        background: "#f3f4f6",
+        color: "#111827",
+        fontFamily:
+          'Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',
       }}
     >
-      <header className="h-16 border-b border-slate-200 bg-white flex items-center px-5">
-        <div className="flex items-center gap-3 w-64">
-          <div className="h-9 w-9 rounded-lg bg-slate-900 text-white flex items-center justify-center font-bold">
+      <div style={{ position: "absolute", inset: 0 }}>
+        <Map
+          activeLayers={activeLayers}
+          userLayers={userLayers}
+          onUserLayersChange={setUserLayers}
+          searchRequest={searchRequest}
+          onProjectStateChange={setProjectState}
+          onFeatureSelect={setSelectedFeature}
+          restoreProject={mapRestore}
+          serviceOpenRequest={serviceOpenRequest}
+        />
+      </div>
+
+      {/* ÜST PROFESYONEL HEADER */}
+      <header
+        style={{
+          position: "absolute",
+          top: 12,
+          left: 12,
+          right: 12,
+          height: 58,
+          zIndex: 500,
+          display: "flex",
+          alignItems: "center",
+          gap: 10,
+          pointerEvents: "none",
+        }}
+      >
+        <div
+          style={{
+            height: 58,
+            minWidth: 216,
+            padding: "0 16px",
+            borderRadius: 14,
+            background: "rgba(255,255,255,0.96)",
+            border: "1px solid #e5e7eb",
+            boxShadow: "0 6px 22px rgba(15,23,42,0.08)",
+            display: "flex",
+            alignItems: "center",
+            gap: 11,
+            pointerEvents: "auto",
+          }}
+        >
+          <div
+            style={{
+              width: 34,
+              height: 34,
+              borderRadius: 10,
+              background: "#111827",
+              color: "#fff",
+              display: "grid",
+              placeItems: "center",
+              fontSize: 16,
+              fontWeight: 850,
+            }}
+          >
             E
           </div>
           <div>
-            <div className="text-lg font-bold">ERGIS</div>
-            <div className="text-[10px] uppercase tracking-widest text-slate-400">
-              Urban Intelligence
+            <div style={{ fontSize: 16, fontWeight: 850, letterSpacing: "-0.03em" }}>ERGIS</div>
+            <div style={{ fontSize: 8, color: "#94a3b8", letterSpacing: "0.18em", fontWeight: 800 }}>
+              URBAN INTELLIGENCE
             </div>
           </div>
         </div>
 
-        <div className="flex-1 max-w-2xl">
-          <form
-            className="mx-auto flex items-center rounded-lg border border-slate-200 bg-slate-50 px-4 py-2"
-            onSubmit={(event) => {
-              event.preventDefault();
-              const query = searchText.trim();
-              if (!query) return;
-              setSearchRequest({ query, id: Date.now() });
+        <div
+          style={{
+            flex: 1,
+            maxWidth: 690,
+            height: 48,
+            margin: "0 auto",
+            borderRadius: 14,
+            background: "rgba(255,255,255,0.96)",
+            border: "1px solid #e5e7eb",
+            boxShadow: "0 6px 22px rgba(15,23,42,0.08)",
+            display: "flex",
+            alignItems: "center",
+            padding: "0 7px 0 15px",
+            pointerEvents: "auto",
+          }}
+        >
+          <span style={{ color: "#9ca3af", fontSize: 17, marginRight: 9 }}>⌕</span>
+          <input
+            value={searchText}
+            onChange={(event) => setSearchText(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter") handleSearch();
             }}
-          >
-            <button
-              type="submit"
-              aria-label="Konum ara"
-              className="mr-3 text-slate-400 hover:text-slate-700"
-            >
-              ⌕
-            </button>
-            <input
-              type="text"
-              value={searchText}
-              onChange={(event) => setSearchText(event.target.value)}
-              placeholder="İl, ilçe, mahalle, adres veya parsel ara..."
-              className="w-full bg-transparent text-sm outline-none"
-            />
-            <span className="rounded border border-slate-200 bg-white px-2 py-1 text-[10px] text-slate-500">
-              ENTER
-            </span>
-          </form>
-        </div>
-
-        <div className="mx-5 flex h-10 min-w-[260px] items-center justify-center rounded-lg bg-slate-900 px-5 text-sm font-bold text-white">
-          APO PİÇTİR PİÇ KALACAK
-        </div>
-
-        <div className="ml-auto flex items-center gap-3">
+            placeholder="İl, ilçe, mahalle, adres veya parsel ara"
+            style={{
+              flex: 1,
+              minWidth: 0,
+              border: 0,
+              outline: 0,
+              background: "transparent",
+              fontSize: 13,
+              color: "#111827",
+            }}
+          />
           <button
             type="button"
-            onClick={openProjects}
-            className="rounded-lg px-3 py-2 text-sm font-medium text-slate-600 hover:bg-slate-100"
+            onClick={handleSearch}
+            style={{
+              height: 34,
+              padding: "0 13px",
+              borderRadius: 9,
+              border: "1px solid #e5e7eb",
+              background: "#f8fafc",
+              color: "#374151",
+              fontSize: 11,
+              fontWeight: 800,
+              cursor: "pointer",
+            }}
           >
-            Projelerim
+            Ara
           </button>
-          <button type="button" className="rounded-lg px-3 py-2 text-sm text-slate-600 hover:bg-slate-100">
-            Yardım
+        </div>
+
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 8,
+            pointerEvents: "auto",
+          }}
+        >
+          <button
+            type="button"
+            onClick={() => setProjectMenuOpen((value) => !value)}
+            style={{
+              height: 42,
+              padding: "0 13px",
+              borderRadius: 11,
+              border: "1px solid #e5e7eb",
+              background: "rgba(255,255,255,0.96)",
+              color: "#374151",
+              cursor: "pointer",
+              fontWeight: 750,
+              fontSize: 12,
+              boxShadow: "0 6px 22px rgba(15,23,42,0.07)",
+            }}
+          >
+            {projectName} ▾
           </button>
-          <div className="h-9 w-9 rounded-full bg-slate-200 flex items-center justify-center font-semibold">
+
+          <button
+            type="button"
+            onClick={saveWorkspace}
+            style={{
+              height: 42,
+              padding: "0 14px",
+              borderRadius: 11,
+              border: "1px solid #111827",
+              background: "#111827",
+              color: "#fff",
+              cursor: "pointer",
+              fontWeight: 800,
+              fontSize: 12,
+              boxShadow: "0 6px 22px rgba(15,23,42,0.14)",
+            }}
+          >
+            {saved ? "✓ Kaydedildi" : "Kaydet"}
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setAccountMenuOpen((value) => !value)}
+            style={{
+              width: 42,
+              height: 42,
+              borderRadius: 12,
+              border: "1px solid #e5e7eb",
+              background: "rgba(255,255,255,0.96)",
+              color: "#111827",
+              cursor: "pointer",
+              fontWeight: 850,
+              fontSize: 13,
+              boxShadow: "0 6px 22px rgba(15,23,42,0.07)",
+            }}
+          >
             E
-          </div>
+          </button>
         </div>
       </header>
 
-      <div className="flex h-[calc(100vh-64px)]">
-        <aside className="relative w-72 shrink-0 overflow-y-auto border-r border-slate-200" style={panelStyle}>
-          <div className="relative z-10">
-            <div className="border-b border-slate-200 bg-white/75 px-5 py-4">
-              <div className="text-xs font-semibold uppercase tracking-wider text-slate-400">
-                Harita
+      {/* PROJE MENÜSÜ */}
+      {projectMenuOpen && (
+        <div
+          style={{
+            position: "absolute",
+            top: 78,
+            right: 118,
+            width: 220,
+            zIndex: 520,
+            background: "#fff",
+            border: "1px solid #e5e7eb",
+            borderRadius: 14,
+            boxShadow: "0 16px 40px rgba(15,23,42,0.16)",
+            padding: 8,
+          }}
+        >
+          <PanelButton onClick={newWorkspace}>
+            <span>＋</span>
+            <span>Yeni çalışma</span>
+          </PanelButton>
+          <PanelButton onClick={saveWorkspace}>
+            <span>▣</span>
+            <span>Çalışmayı kaydet</span>
+          </PanelButton>
+          <PanelButton onClick={openProjects}>
+            <span>⌁</span>
+            <span>Projelerim</span>
+          </PanelButton>
+        </div>
+      )}
+
+      {accountMenuOpen && (
+        <div
+          style={{
+            position: "absolute",
+            top: 78,
+            right: 12,
+            width: 220,
+            zIndex: 520,
+            background: "#fff",
+            border: "1px solid #e5e7eb",
+            borderRadius: 14,
+            boxShadow: "0 16px 40px rgba(15,23,42,0.16)",
+            padding: 12,
+          }}
+        >
+          <div style={{ fontSize: 12, fontWeight: 800 }}>ERGIS hesabı</div>
+          <div style={{ fontSize: 11, color: "#9ca3af", marginTop: 3 }}>
+            Çalışma alanı
+          </div>
+          <div style={{ height: 1, background: "#f1f5f9", margin: "10px 0" }} />
+          <PanelButton>
+            <span>⚙</span>
+            <span>Hesap ayarları</span>
+          </PanelButton>
+          <PanelButton onClick={() => setAccountMenuOpen(false)} danger>
+            <span>↪</span>
+            <span>Menüyü kapat</span>
+          </PanelButton>
+        </div>
+      )}
+
+      {/* SOL KATMAN PANELİ */}
+      <aside
+        style={{
+          position: "absolute",
+          left: 12,
+          top: 82,
+          bottom: 18,
+          width: leftOpen ? 292 : 50,
+          zIndex: 450,
+          transition: "width 180ms ease",
+          background: "rgba(255,255,255,0.97)",
+          border: "1px solid #e5e7eb",
+          borderRadius: 16,
+          boxShadow: "0 10px 30px rgba(15,23,42,0.10)",
+          overflow: "hidden",
+        }}
+      >
+        {!leftOpen ? (
+          <button
+            type="button"
+            onClick={() => setLeftOpen(true)}
+            style={{ ...iconButtonStyle(), margin: 7 }}
+          >
+            ›
+          </button>
+        ) : (
+          <div style={{ height: "100%", display: "flex", flexDirection: "column" }}>
+            <div style={{ padding: "17px 16px 13px", borderBottom: "1px solid #f1f5f9" }}>
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+                <SectionTitle eyebrow="Çalışma alanı" title="Katmanlar" />
+                <button
+                  type="button"
+                  onClick={() => setLeftOpen(false)}
+                  style={iconButtonStyle()}
+                  title="Paneli daralt"
+                >
+                  ‹
+                </button>
               </div>
-              <div className="mt-1 text-base font-bold">Katmanlar</div>
+
+              <button
+                type="button"
+                onClick={() => {
+                  setLayerSearch("");
+                  setUploadOpen(true);
+                }}
+                style={{
+                  width: "100%",
+                  height: 38,
+                  borderRadius: 10,
+                  border: "1px solid #e5e7eb",
+                  background: "#f8fafc",
+                  color: "#374151",
+                  cursor: "pointer",
+                  fontSize: 12,
+                  fontWeight: 750,
+                  textAlign: "left",
+                  padding: "0 11px",
+                }}
+              >
+                ＋ Katman ekle
+              </button>
+
+              <div
+                style={{
+                  marginTop: 9,
+                  height: 36,
+                  border: "1px solid #e5e7eb",
+                  borderRadius: 10,
+                  display: "flex",
+                  alignItems: "center",
+                  padding: "0 10px",
+                  background: "#fff",
+                }}
+              >
+                <span style={{ color: "#9ca3af", marginRight: 7 }}>⌕</span>
+                <input
+                  value={layerSearch}
+                  onChange={(event) => setLayerSearch(event.target.value)}
+                  placeholder="Katman ara"
+                  style={{
+                    flex: 1,
+                    border: 0,
+                    outline: 0,
+                    fontSize: 11,
+                    minWidth: 0,
+                    background: "transparent",
+                  }}
+                />
+              </div>
             </div>
 
-            <div className="p-3">
-              {layers.map((layer) => {
-                const active = selectedLayer === layer.id;
+            <div style={{ flex: 1, overflowY: "auto", padding: "12px 10px 90px" }}>
+              <div
+                style={{
+                  fontSize: 9,
+                  color: "#9ca3af",
+                  fontWeight: 850,
+                  letterSpacing: "0.12em",
+                  textTransform: "uppercase",
+                  padding: "3px 7px 7px",
+                }}
+              >
+                Sistem katmanları
+              </div>
+
+              {filteredLayers.map((layer) => {
+                const active = activeLayers.includes(layer.id);
                 return (
                   <button
                     key={layer.id}
                     type="button"
-                    onClick={() => setSelectedLayer(layer.id)}
-                    className={`mb-1 flex w-full items-center gap-3 rounded-lg px-3 py-3 text-left transition ${
-                      active
-                        ? "bg-white/90 text-slate-900 shadow-sm"
-                        : "text-slate-600 hover:bg-white/70"
-                    }`}
+                    onClick={() => toggleLayer(layer.id)}
+                    style={{
+                      width: "100%",
+                      minHeight: 52,
+                      border: active ? "1px solid #d1d5db" : "1px solid transparent",
+                      background: active ? "#f8fafc" : "#fff",
+                      borderRadius: 11,
+                      marginBottom: 5,
+                      padding: "8px 9px",
+                      display: "flex",
+                      alignItems: "center",
+                      gap: 9,
+                      cursor: "pointer",
+                      textAlign: "left",
+                    }}
                   >
-                    <span className={`flex h-7 w-7 items-center justify-center rounded-md text-sm ${
-                      active ? "bg-slate-900 text-white" : "bg-white/70 text-slate-400"
-                    }`}>
+                    <span
+                      style={{
+                        width: 30,
+                        height: 30,
+                        borderRadius: 8,
+                        background: `${layer.color}12`,
+                        color: layer.color,
+                        display: "grid",
+                        placeItems: "center",
+                        fontWeight: 850,
+                        fontSize: 14,
+                        flexShrink: 0,
+                      }}
+                    >
                       {layer.icon}
                     </span>
-                    <span className="flex-1 text-sm font-medium">{layer.name}</span>
-                    <span className={`h-2 w-2 rounded-full ${
-                      active ? "bg-emerald-500" : "bg-slate-200"
-                    }`} />
+                    <span style={{ minWidth: 0, flex: 1 }}>
+                      <span
+                        style={{
+                          display: "block",
+                          fontSize: 12,
+                          fontWeight: 750,
+                          color: "#1f2937",
+                          whiteSpace: "nowrap",
+                          overflow: "hidden",
+                          textOverflow: "ellipsis",
+                        }}
+                      >
+                        {layer.name}
+                      </span>
+                      <span style={{ display: "block", fontSize: 9, color: "#9ca3af", marginTop: 2 }}>
+                        {layer.description}
+                      </span>
+                    </span>
+                    <span
+                      style={{
+                        width: 7,
+                        height: 7,
+                        borderRadius: "50%",
+                        background: active ? "#22c55e" : "#d1d5db",
+                        flexShrink: 0,
+                      }}
+                    />
                   </button>
                 );
               })}
-            </div>
 
-            <div className="border-t border-slate-200/70 p-4">
-              <div className="mb-3 flex items-center justify-between">
-                <div className="text-[11px] font-semibold uppercase tracking-wider text-slate-400">
-                  Verilerim
-                </div>
-                <button
-                  type="button"
-                  onClick={() => setUploadOpen(true)}
-                  className="rounded-md bg-slate-900 px-2 py-1 text-xs font-semibold text-white"
-                >
-                  + Veri Ekle
-                </button>
-              </div>
+              {userLayers.length > 0 && (
+                <>
+                  <div
+                    style={{
+                      fontSize: 9,
+                      color: "#9ca3af",
+                      fontWeight: 850,
+                      letterSpacing: "0.12em",
+                      textTransform: "uppercase",
+                      padding: "15px 7px 7px",
+                    }}
+                  >
+                    Benim katmanlarım
+                  </div>
 
-              {userLayers.length === 0 ? (
-                <div
-                  className="rounded-xl border border-dashed border-slate-300 bg-white/70 p-4 text-center text-xs text-slate-500"
-                  onClick={() => setUploadOpen(true)}
-                >
-                  Henüz veri yok.
-                  <br />
-                  Dosyanı buraya sürükleyebilirsin.
-                </div>
-              ) : (
-                <div className="space-y-1">
                   {userLayers.map((layer) => (
                     <div
                       key={layer.id}
-                      className="flex items-center gap-2 rounded-lg bg-white/75 px-2 py-2"
+                      style={{
+                        minHeight: 48,
+                        border: "1px solid #eef2f7",
+                        borderRadius: 11,
+                        marginBottom: 5,
+                        padding: "8px 9px",
+                        display: "flex",
+                        alignItems: "center",
+                        gap: 9,
+                      }}
                     >
+                      <span
+                        style={{
+                          width: 26,
+                          height: 26,
+                          borderRadius: 7,
+                          background: layer.color,
+                          opacity: layer.opacity,
+                        }}
+                      />
+                      <span style={{ flex: 1, minWidth: 0 }}>
+                        <span style={{ display: "block", fontSize: 11, fontWeight: 750 }}>{layer.name}</span>
+                        <span style={{ display: "block", fontSize: 9, color: "#9ca3af" }}>
+                          {layer.data.features.length} obje
+                        </span>
+                      </span>
                       <button
                         type="button"
-                        onClick={() => toggleLayer(layer.id)}
-                        className="w-6 text-center"
-                        title={layer.visible ? "Gizle" : "Göster"}
+                        onClick={() =>
+                          setUserLayers((layers) =>
+                            layers.map((item) =>
+                              item.id === layer.id ? { ...item, visible: !item.visible } : item
+                            )
+                          )
+                        }
+                        style={iconButtonStyle(layer.visible)}
                       >
-                        {layer.visible ? "👁" : "○"}
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => renameLayer(layer.id)}
-                        className="min-w-0 flex-1 truncate text-left text-xs font-medium text-slate-700"
-                        title="Yeniden adlandır"
-                      >
-                        {layer.name}
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => deleteLayer(layer.id)}
-                        className="text-xs text-red-500"
-                        title="Katmanı sil"
-                      >
-                        ×
+                        {layer.visible ? "●" : "○"}
                       </button>
                     </div>
                   ))}
-                </div>
+                </>
               )}
-
-              <div className="mt-4 border-t border-slate-200/70 pt-4">
-                <div className="mb-3 text-[11px] font-semibold uppercase tracking-wider text-slate-400">
-                  Araçlar
-                </div>
-                <button type="button" className="flex w-full items-center gap-3 rounded-lg px-3 py-3 text-left text-sm text-slate-600 hover:bg-white/70">
-                  <span className="flex h-7 w-7 items-center justify-center rounded-md bg-indigo-50 text-indigo-600">◇</span>
-                  Mekânsal Analiz
-                </button>
-                <button type="button" className="mt-1 flex w-full items-center gap-3 rounded-lg px-3 py-3 text-left text-sm text-slate-600 hover:bg-white/70">
-                  <span className="flex h-7 w-7 items-center justify-center rounded-md bg-purple-50 text-purple-600">✦</span>
-                  Yapay Zekâ
-                </button>
-              </div>
             </div>
           </div>
-        </aside>
+        )}
+      </aside>
 
-        <section className="relative flex-1 overflow-hidden">
-          <Map
-            userLayers={mapLayers}
-            onUserLayersChange={(nextLayers) => {
-              setUserLayers((current) =>
-                current.map((layer) => {
-                  const next = nextLayers.find((item) => item.id === layer.id);
-                  return next
-                    ? { ...layer, data: next.data, color: next.color, opacity: next.opacity, visible: next.visible }
-                    : layer;
-                }),
-              );
-            }}
-            searchRequest={searchRequest}
-          />
-
-          {dragging && (
-            <div className="pointer-events-none absolute inset-5 z-[300] flex items-center justify-center rounded-2xl border-2 border-dashed border-indigo-500 bg-white/80 backdrop-blur-sm">
-              <div className="rounded-xl bg-slate-900 px-8 py-5 text-center text-white shadow-xl">
-                <div className="text-3xl">📂</div>
-                <div className="mt-2 text-lg font-bold">Veriyi buraya bırak</div>
-                <div className="mt-1 text-xs text-slate-300">
-                  GeoJSON · CSV · KML
-                </div>
-              </div>
-            </div>
-          )}
-        </section>
-
-        <aside className="relative w-80 shrink-0 overflow-y-auto border-l border-slate-200" style={panelStyle}>
-          <div className="relative z-10">
-            <div className="border-b border-slate-200 bg-white/75 px-5 py-4">
-              <div className="text-xs font-semibold uppercase tracking-wider text-slate-400">
-                Bilgi
-              </div>
-              <div className="mt-1 text-base font-bold">Özellikler</div>
-            </div>
-
-            <div className="p-5">
-              <div className="rounded-xl border border-dashed border-slate-200 bg-white/75 p-6 text-center">
-                <div className="text-2xl">⌖</div>
-                <div className="mt-3 text-sm font-semibold">
-                  Haritadan bir nesne seçin
-                </div>
-                <p className="mt-2 text-xs leading-5 text-slate-400">
-                  Parsel, bina, imar planı veya yüklediğiniz verilerden bir
-                  nesneyi seçtiğinizde detayları burada görüntülenecek.
-                </p>
-              </div>
-
-              <button type="button" className="mt-4 flex w-full items-center justify-center gap-2 rounded-lg bg-slate-900 px-4 py-3 text-sm font-semibold text-white hover:bg-slate-800">
-                ✦ Yapay Zekâ ile Analiz Et
-              </button>
-            </div>
-          </div>
-        </aside>
-      </div>
-
-      {projectsOpen && (
-        <div
-          className="fixed inset-0 z-[700] flex items-center justify-center bg-slate-950/50 p-5 backdrop-blur-sm"
-          onClick={() => setProjectsOpen(false)}
-        >
-          <div
-            className="w-full max-w-2xl rounded-2xl bg-white shadow-2xl"
-            onClick={(event) => event.stopPropagation()}
+      {/* SAĞ ÖZELLİKLER PANELİ */}
+      <aside
+        style={{
+          position: "absolute",
+          right: 12,
+          top: 82,
+          bottom: 18,
+          width: rightOpen ? 306 : 50,
+          zIndex: 450,
+          transition: "width 180ms ease",
+          background: "rgba(255,255,255,0.97)",
+          border: "1px solid #e5e7eb",
+          borderRadius: 16,
+          boxShadow: "0 10px 30px rgba(15,23,42,0.10)",
+          overflow: "hidden",
+        }}
+      >
+        {!rightOpen ? (
+          <button
+            type="button"
+            onClick={() => setRightOpen(true)}
+            style={{ ...iconButtonStyle(), margin: 7 }}
           >
-            <div className="flex items-center justify-between border-b border-slate-200 px-6 py-5">
-              <div>
-                <div className="text-xl font-bold text-slate-900">Projelerim</div>
-                <div className="mt-1 text-xs text-slate-400">
-                  Projelerini aç, kaldığın yerden devam et.
-                </div>
+            ‹
+          </button>
+        ) : (
+          <div style={{ height: "100%", display: "flex", flexDirection: "column" }}>
+            <div style={{ padding: "17px 16px 13px", borderBottom: "1px solid #f1f5f9" }}>
+              <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between" }}>
+                <SectionTitle eyebrow="Seçim" title="Özellikler" />
+                <button
+                  type="button"
+                  onClick={() => setRightOpen(false)}
+                  style={iconButtonStyle()}
+                  title="Paneli daralt"
+                >
+                  ›
+                </button>
               </div>
-
-              <button
-                type="button"
-                onClick={() => setProjectsOpen(false)}
-                className="rounded-lg px-3 py-2 text-slate-500 hover:bg-slate-100"
-              >
-                ✕
-              </button>
             </div>
 
-            <div className="max-h-[60vh] overflow-y-auto p-6">
-              {projects.length === 0 ? (
-                <div className="rounded-2xl border border-dashed border-slate-300 bg-slate-50 p-10 text-center">
-                  <div className="text-4xl">🗺️</div>
-                  <div className="mt-3 text-base font-bold">Henüz projen yok</div>
-                  <div className="mt-1 text-sm text-slate-400">
-                    İlk projenizi oluşturup çalışmaya başlayabilirsin.
+            <div style={{ flex: 1, overflowY: "auto", padding: 14 }}>
+              {selectedFeature ? (
+                <div>
+                  <div
+                    style={{
+                      borderRadius: 12,
+                      background: "#111827",
+                      color: "#fff",
+                      padding: 14,
+                      marginBottom: 10,
+                    }}
+                  >
+                    <div style={{ fontSize: 9, opacity: 0.6, letterSpacing: "0.1em", textTransform: "uppercase" }}>
+                      Seçili obje
+                    </div>
+                    <div style={{ fontSize: 15, fontWeight: 800, marginTop: 4 }}>
+                      {selectedFeature.layerName}
+                    </div>
+                    <div style={{ fontSize: 10, opacity: 0.65, marginTop: 3 }}>
+                      {selectedFeature.feature.geometry?.type ?? "Geometri yok"}
+                    </div>
+                  </div>
+
+                  <div
+                    style={{
+                      border: "1px solid #e5e7eb",
+                      borderRadius: 12,
+                      overflow: "hidden",
+                      background: "#fff",
+                    }}
+                  >
+                    {Object.entries(selectedFeature.feature.properties ?? {}).map(([key, value]) => (
+                      <div
+                        key={key}
+                        style={{
+                          display: "grid",
+                          gridTemplateColumns: "42% 58%",
+                          borderBottom: "1px solid #f1f5f9",
+                          minHeight: 42,
+                        }}
+                      >
+                        <div style={{ padding: "10px 9px", fontSize: 10, color: "#9ca3af", fontWeight: 750 }}>
+                          {key}
+                        </div>
+                        <div style={{ padding: "10px 9px", fontSize: 11, color: "#374151", wordBreak: "break-word" }}>
+                          {String(value ?? "")}
+                        </div>
+                      </div>
+                    ))}
+                    {Object.keys(selectedFeature.feature.properties ?? {}).length === 0 && (
+                      <div style={{ padding: 20, textAlign: "center", fontSize: 11, color: "#9ca3af" }}>
+                        Bu objede öznitelik bulunmuyor.
+                      </div>
+                    )}
                   </div>
                 </div>
               ) : (
-                <div className="space-y-3">
-                  {projects.map((project) => (
+                <>
+                  <div
+                    style={{
+                      border: "1px dashed #d1d5db",
+                      borderRadius: 14,
+                      padding: "28px 16px",
+                      textAlign: "center",
+                      background: "#fafafa",
+                    }}
+                  >
                     <div
-                      key={project.id}
-                      className={`flex items-center gap-3 rounded-xl border p-4 ${
-                        activeProjectId === project.id
-                          ? "border-indigo-300 bg-indigo-50"
-                          : "border-slate-200 bg-white"
-                      }`}
+                      style={{
+                        width: 42,
+                        height: 42,
+                        borderRadius: 12,
+                        background: "#f3f4f6",
+                        margin: "0 auto 12px",
+                        display: "grid",
+                        placeItems: "center",
+                        color: "#9ca3af",
+                        fontSize: 17,
+                      }}
                     >
-                      <button
-                        type="button"
-                        onClick={() => openProject(project)}
-                        className="min-w-0 flex-1 text-left"
-                      >
-                        <div className="truncate text-sm font-bold text-slate-900">
-                          {project.name}
-                        </div>
-                        <div className="mt-1 text-xs text-slate-400">
-                          Son kayıt: {new Date(project.updatedAt).toLocaleString("tr-TR")}
-                        </div>
-                      </button>
+                      ⊙
+                    </div>
+                    <div style={{ fontSize: 13, fontWeight: 800, color: "#374151" }}>
+                      Haritadan bir nesne seç
+                    </div>
+                    <div style={{ fontSize: 10, color: "#9ca3af", lineHeight: 1.6, marginTop: 6 }}>
+                      Kendi verilerinden bir objeye tıkla; geometri ve öznitelik bilgileri burada görünsün.
+                    </div>
+                  </div>
 
-                      <button
-                        type="button"
-                        onClick={() => renameProject(project)}
-                        className="rounded-lg px-3 py-2 text-xs text-slate-500 hover:bg-slate-100"
-                      >
-                        Düzenle
-                      </button>
+                  <div
+                    style={{
+                      marginTop: 12,
+                      border: "1px solid #e5e7eb",
+                      borderRadius: 14,
+                      padding: 14,
+                    }}
+                  >
+                    <SectionTitle eyebrow="Çalışma" title={projectName} />
+                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 7 }}>
+                      <div style={{ padding: 10, background: "#f8fafc", borderRadius: 10 }}>
+                        <div style={{ fontSize: 9, color: "#9ca3af" }}>Katman</div>
+                        <div style={{ fontSize: 14, fontWeight: 800, marginTop: 3 }}>
+                          {userLayers.length}
+                        </div>
+                      </div>
+                      <div style={{ padding: 10, background: "#f8fafc", borderRadius: 10 }}>
+                        <div style={{ fontSize: 9, color: "#9ca3af" }}>Aktif</div>
+                        <div style={{ fontSize: 14, fontWeight: 800, marginTop: 3 }}>
+                          {activeLayers.length}
+                        </div>
+                      </div>
+                    </div>
+                  </div>
 
+                  <div
+                    style={{
+                      marginTop: 12,
+                      borderRadius: 14,
+                      background: "#111827",
+                      color: "#fff",
+                      padding: 14,
+                    }}
+                  >
+                    <div style={{ display: "flex", alignItems: "center", gap: 9 }}>
+                      <div
+                        style={{
+                          width: 32,
+                          height: 32,
+                          borderRadius: 9,
+                          background: "#1f2937",
+                          display: "grid",
+                          placeItems: "center",
+                        }}
+                      >
+                        ✦
+                      </div>
+                      <div>
+                        <div style={{ fontSize: 12, fontWeight: 800 }}>Yapay zekâ</div>
+                        <div style={{ fontSize: 9, color: "#9ca3af", marginTop: 2 }}>
+                          Mekânsal analiz asistanı
+                        </div>
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      style={{
+                        width: "100%",
+                        height: 36,
+                        marginTop: 12,
+                        border: 0,
+                        borderRadius: 9,
+                        background: "#fff",
+                        color: "#111827",
+                        fontSize: 11,
+                        fontWeight: 800,
+                        cursor: "pointer",
+                      }}
+                    >
+                      Analiz alanını aç
+                    </button>
+                  </div>
+
+                  <div
+                    style={{
+                      marginTop: 12,
+                      border: "1px solid #e5e7eb",
+                      borderRadius: 14,
+                      padding: 14,
+                    }}
+                  >
+                    <SectionTitle eyebrow="Veri" title="Veri ekle" />
+                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 7 }}>
                       <button
                         type="button"
-                        onClick={() => deleteProject(project)}
-                        className="rounded-lg px-3 py-2 text-xs text-red-500 hover:bg-red-50"
+                        onClick={openFilePicker}
+                        style={{
+                          height: 72,
+                          borderRadius: 10,
+                          border: "1px solid #e5e7eb",
+                          background: "#fff",
+                          cursor: "pointer",
+                          textAlign: "left",
+                          padding: 10,
+                        }}
                       >
-                        Sil
+                        <div style={{ fontSize: 16 }}>▣</div>
+                        <div style={{ fontSize: 11, fontWeight: 800, marginTop: 7 }}>Dosya</div>
+                        <div style={{ fontSize: 8, color: "#9ca3af", marginTop: 2 }}>GeoJSON / CSV / KML</div>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={handleServiceOpen}
+                        style={{
+                          height: 72,
+                          borderRadius: 10,
+                          border: "1px solid #e5e7eb",
+                          background: "#fff",
+                          cursor: "pointer",
+                          textAlign: "left",
+                          padding: 10,
+                        }}
+                      >
+                        <div style={{ fontSize: 16 }}>◎</div>
+                        <div style={{ fontSize: 11, fontWeight: 800, marginTop: 7 }}>Servis</div>
+                        <div style={{ fontSize: 8, color: "#9ca3af", marginTop: 2 }}>WMS / WFS / WMTS</div>
                       </button>
                     </div>
-                  ))}
-                </div>
+                  </div>
+                </>
               )}
             </div>
-
-            <div className="flex items-center justify-between border-t border-slate-200 px-6 py-4">
-              <button
-                type="button"
-                onClick={saveActiveProjectNow}
-                className="rounded-lg border border-slate-200 px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50"
-              >
-                Şimdi Kaydet
-              </button>
-
-              <button
-                type="button"
-                onClick={startNewProject}
-                className="rounded-lg bg-slate-900 px-4 py-2 text-sm font-semibold text-white hover:bg-slate-800"
-              >
-                + Yeni Proje Oluştur
-              </button>
-            </div>
           </div>
-        </div>
-      )}
+        )}
+      </aside>
 
-      {projectNameOpen && (
-        <div
-          className="fixed inset-0 z-[800] flex items-center justify-center bg-slate-950/60 p-5 backdrop-blur-sm"
-          onClick={() => setProjectNameOpen(false)}
-        >
-          <div
-            className="w-full max-w-md rounded-2xl bg-white p-6 shadow-2xl"
-            onClick={(event) => event.stopPropagation()}
-          >
-            <div className="text-lg font-bold">Yeni Proje</div>
-            <div className="mt-1 text-xs text-slate-400">
-              Projene bir isim ver.
-            </div>
-
-            <input
-              autoFocus
-              value={projectName}
-              onChange={(event) => setProjectName(event.target.value)}
-              onKeyDown={(event) => {
-                if (event.key === "Enter") confirmNewProject();
-              }}
-              placeholder="Örn. Bursa 1/5000 Planı"
-              className="mt-5 w-full rounded-xl border border-slate-300 px-4 py-3 text-sm outline-none focus:border-indigo-500"
-            />
-
-            <div className="mt-5 flex justify-end gap-2">
-              <button
-                type="button"
-                onClick={() => setProjectNameOpen(false)}
-                className="rounded-lg px-4 py-2 text-sm text-slate-500 hover:bg-slate-100"
-              >
-                Vazgeç
-              </button>
-              <button
-                type="button"
-                onClick={confirmNewProject}
-                className="rounded-lg bg-slate-900 px-4 py-2 text-sm font-semibold text-white hover:bg-slate-800"
-              >
-                Oluştur
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
+      <input
+        ref={fileInputRef}
+        type="file"
+        accept=".geojson,.json,.csv,.kml"
+        multiple
+        onChange={(event) => {
+          void handleFiles(event.target.files);
+        }}
+        style={{ display: "none" }}
+      />
 
       {uploadOpen && (
         <div
-          className="fixed inset-0 z-[500] flex items-center justify-center bg-slate-950/45 p-5 backdrop-blur-sm"
+          style={{
+            position: "absolute",
+            inset: 0,
+            zIndex: 800,
+            display: "grid",
+            placeItems: "center",
+            background: "rgba(15,23,42,0.45)",
+            backdropFilter: "blur(4px)",
+          }}
           onClick={() => setUploadOpen(false)}
         >
           <div
-            className="w-full max-w-xl rounded-2xl bg-white p-6 shadow-2xl"
+            style={{
+              width: 420,
+              maxWidth: "calc(100% - 28px)",
+              padding: 18,
+              borderRadius: 16,
+              background: "#fff",
+              boxShadow: "0 20px 60px rgba(15,23,42,0.24)",
+            }}
             onClick={(event) => event.stopPropagation()}
           >
-            <div className="flex items-center justify-between">
+            <div style={{ fontSize: 16, fontWeight: 850, color: "#111827" }}>Veri ekle</div>
+            <div style={{ marginTop: 4, fontSize: 11, color: "#9ca3af" }}>
+              GeoJSON, JSON, CSV veya KML dosyanı haritaya katman olarak ekle.
+            </div>
+            <button
+              type="button"
+              onClick={openFilePicker}
+              style={{
+                width: "100%",
+                marginTop: 16,
+                padding: "14px 12px",
+                borderRadius: 12,
+                border: "1px dashed #94a3b8",
+                background: "#f8fafc",
+                cursor: "pointer",
+                fontWeight: 800,
+                color: "#334155",
+              }}
+            >
+              Dosya seç
+            </button>
+            <button
+              type="button"
+              onClick={() => setUploadOpen(false)}
+              style={{
+                width: "100%",
+                marginTop: 8,
+                padding: 10,
+                border: 0,
+                background: "transparent",
+                cursor: "pointer",
+                color: "#64748b",
+              }}
+            >
+              Vazgeç
+            </button>
+          </div>
+        </div>
+      )}
+
+      {projectsOpen && (
+        <div
+          style={{
+            position: "absolute",
+            inset: 0,
+            zIndex: 810,
+            display: "grid",
+            placeItems: "center",
+            background: "rgba(15,23,42,0.45)",
+            backdropFilter: "blur(4px)",
+          }}
+          onClick={() => setProjectsOpen(false)}
+        >
+          <div
+            style={{
+              width: 460,
+              maxWidth: "calc(100% - 28px)",
+              padding: 18,
+              borderRadius: 16,
+              background: "#fff",
+              boxShadow: "0 20px 60px rgba(15,23,42,0.24)",
+            }}
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
               <div>
-                <div className="text-lg font-bold">Veri Ekle</div>
-                <div className="mt-1 text-xs text-slate-400">
-                  Verini yükle, ŞehirGIS haritaya katman olarak eklesin.
+                <div style={{ fontSize: 16, fontWeight: 850 }}>Projelerim</div>
+                <div style={{ marginTop: 4, fontSize: 11, color: "#9ca3af" }}>
+                  Bu çalışma alanındaki kayıtlı proje.
                 </div>
               </div>
               <button
                 type="button"
-                onClick={() => setUploadOpen(false)}
-                className="rounded-lg px-3 py-2 text-slate-500 hover:bg-slate-100"
+                onClick={() => setProjectsOpen(false)}
+                style={{ border: 0, background: "#f1f5f9", borderRadius: 9, width: 32, height: 32, cursor: "pointer" }}
               >
-                ✕
+                ×
               </button>
             </div>
 
             <button
               type="button"
-              className="mt-6 flex w-full flex-col items-center justify-center rounded-2xl border-2 border-dashed border-slate-300 bg-slate-50 px-6 py-12 hover:border-indigo-400 hover:bg-indigo-50/30"
-              onClick={() => fileInputRef.current?.click()}
+              onClick={() => {
+                const raw = localStorage.getItem(STORAGE_KEY);
+                if (!raw) return;
+                setProjectsOpen(false);
+                setSaved(true);
+                window.setTimeout(() => setSaved(false), 1200);
+              }}
+              style={{
+                width: "100%",
+                marginTop: 16,
+                padding: 13,
+                borderRadius: 12,
+                border: "1px solid #e5e7eb",
+                background: "#f8fafc",
+                textAlign: "left",
+                cursor: "pointer",
+              }}
             >
-              <div className="text-4xl">📂</div>
-              <div className="mt-3 text-base font-bold text-slate-800">
-                Dosya seç
-              </div>
-              <div className="mt-1 text-xs text-slate-500">
-                GeoJSON, JSON, CSV veya KML
+              <div style={{ fontSize: 12, fontWeight: 800 }}>{projectName}</div>
+              <div style={{ marginTop: 4, fontSize: 10, color: "#9ca3af" }}>
+                Yerel çalışma kaydı
               </div>
             </button>
 
-            <input
-              ref={fileInputRef}
-              type="file"
-              accept=".geojson,.json,.csv,.kml"
-              multiple
-              className="hidden"
-              onChange={(event) => {
-                if (event.target.files) void importFiles(event.target.files);
-                event.currentTarget.value = "";
+            <button
+              type="button"
+              onClick={saveWorkspace}
+              style={{
+                width: "100%",
+                marginTop: 10,
+                padding: 11,
+                borderRadius: 10,
+                border: "1px solid #111827",
+                background: "#111827",
+                color: "#fff",
+                cursor: "pointer",
+                fontWeight: 800,
               }}
-            />
-
-            <div className="mt-5 grid grid-cols-3 gap-3">
-              {[
-                ["🗺️", "GeoJSON", "Nokta, çizgi, alan"],
-                ["📊", "CSV", "X/Y veya lat/lon"],
-                ["🌍", "KML", "Google Earth verisi"],
-              ].map(([icon, title, description]) => (
-                <div key={title} className="rounded-xl border border-slate-200 p-3">
-                  <div className="text-xl">{icon}</div>
-                  <div className="mt-2 text-xs font-bold">{title}</div>
-                  <div className="mt-1 text-[10px] leading-4 text-slate-400">
-                    {description}
-                  </div>
-                </div>
-              ))}
-            </div>
+            >
+              Şimdi kaydet
+            </button>
           </div>
         </div>
       )}
 
-      {message && (
-        <div className="fixed bottom-6 left-1/2 z-[600] -translate-x-1/2 rounded-xl bg-slate-900 px-5 py-3 text-sm font-semibold text-white shadow-xl">
-          {message}
+      {/* PANEL DURUM ROZETİ */}
+      <div
+        style={{
+          position: "absolute",
+          left: "50%",
+          bottom: 102,
+          transform: "translateX(-50%)",
+          zIndex: 430,
+          display: "flex",
+          gap: 6,
+          padding: 5,
+          borderRadius: 12,
+          background: "rgba(255,255,255,0.94)",
+          border: "1px solid #e5e7eb",
+          boxShadow: "0 6px 20px rgba(15,23,42,0.08)",
+        }}
+      >
+        <button type="button" onClick={() => setLeftOpen((value) => !value)} style={{ ...iconButtonStyle(leftOpen) }}>
+          ☰
+        </button>
+        <button type="button" onClick={() => setRightOpen((value) => !value)} style={{ ...iconButtonStyle(rightOpen) }}>
+          ⊞
+        </button>
+        <div style={{ width: 1, background: "#e5e7eb", margin: "4px 2px" }} />
+        <div style={{ display: "flex", alignItems: "center", padding: "0 9px", fontSize: 10, color: "#6b7280", fontWeight: 750 }}>
+          Ölçek&nbsp; <strong style={{ color: "#111827" }}>1:{projectState.scaleDenominator.toLocaleString("tr-TR")}</strong>
         </div>
-      )}
+      </div>
     </main>
   );
 }
